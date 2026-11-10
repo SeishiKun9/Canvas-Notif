@@ -6,6 +6,7 @@ new assignments, and upcoming assignment due dates.
 ## Requirements
 
 - Python 3.10 or newer
+- PostgreSQL 14 or newer
 - A Discord application with a bot user
 - A Canvas access token with permission to read your courses, announcements, and assignments
 
@@ -16,8 +17,9 @@ new assignments, and upcoming assignment due dates.
    Copy the bot token and the target channel ID.
 2. Create a Canvas access token in your Canvas account's approved integrations/profile
    settings. Keep the token private.
-3. Copy `.env.example` to `.env` and set `DISCORD_BOT_TOKEN`,
-   `DISCORD_CHANNEL_ID`, `CANVAS_BASE_URL`, and `CANVAS_API_TOKEN`.
+3. Create a PostgreSQL database and copy `.env.example` to `.env`. Set
+   `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `CANVAS_BASE_URL`,
+   `CANVAS_API_TOKEN`, and `DATABASE_URL` to your PostgreSQL connection URL.
    `CANVAS_BASE_URL` is your school's Canvas site, such as
    `https://school.instructure.com`.
 4. Optionally set `CANVAS_COURSE_IDS` to a comma-separated list of course IDs.
@@ -36,32 +38,36 @@ posting them, avoiding a history dump. New items are posted on later polls.
 Assignments receive reminders at the thresholds in `DUE_REMINDER_HOURS` (default:
 24 and 1 hour before due time). A reminder missed during downtime is sent at the
 next poll; if multiple thresholds were missed, only the closest threshold is sent.
-The SQLite database stores seen items and sent reminders across restarts.
+The bot runs pending versioned SQL migrations at startup and stores seen items
+and sent reminders in PostgreSQL.
 
-Keep `.env` and `canvas_notifier.sqlite3` private. If either token is exposed,
-revoke it in the corresponding service and create a replacement.
+Keep `.env` private. If either token is exposed, revoke it in the corresponding
+service and create a replacement.
 
 ## Deploy on Railway
 
-SQLite is appropriate for this bot's small state and single running instance.
-When hosting it on Railway, attach a persistent volume so its database survives
-restarts and redeploys:
+Use Railway's managed PostgreSQL service for persistent bot state:
 
-1. Push this repository to GitHub and create a Railway project from the repository.
-   Railway uses the included `Dockerfile` and `railway.json` to run the bot as a
-   worker process.
-2. In the Railway service's **Settings > Volumes**, add a volume mounted at
-   `/data`.
-3. In the service's **Variables**, add the four required values from `.env.example`
-   (`DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `CANVAS_BASE_URL`, and
-   `CANVAS_API_TOKEN`). Add `STATE_DB_PATH=/data/canvas_notifier.sqlite3`.
-   Add any optional course IDs or reminder settings you need. Enter secrets
-   directly in Railway; do not commit `.env` or paste tokens into chat.
-4. Deploy the service and check its logs for the Discord bot's successful login.
+1. Create a Railway project from this GitHub repository. The included
+   `Dockerfile` runs the bot as a worker.
+2. Add a PostgreSQL service to the Railway project.
+3. In the bot service's **Variables**, add a reference to the database service's
+   connection URL as `DATABASE_URL` (for example,
+   `${{Postgres.DATABASE_URL}}`, using the actual PostgreSQL service name).
+   Add `DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `CANVAS_BASE_URL`, and
+   `CANVAS_API_TOKEN` as service variables. Enter secrets directly in Railway;
+   do not commit `.env` or paste tokens into chat.
+4. Deploy the bot service. It applies pending migrations at startup; check the
+   service logs for migration and Discord login messages.
 
-Keep the service to one running replica: SQLite is a single-instance database and
-is not suitable for multiple bot replicas sharing the same file. A hosted
-PostgreSQL database would be the next step if you later need multiple replicas.
+Do not run multiple bot replicas unless you also add distributed polling locks
+and delivery coordination. PostgreSQL supports multiple clients, but this bot's
+polling loop is designed to run once.
+
+The database schema is versioned under `migrations/sql/`. Add a new, higher
+numbered SQL file for future schema changes; applied migrations are recorded in
+`schema_migrations` and run transactionally at startup. Existing SQLite state is
+not imported automatically; the new PostgreSQL database starts with empty state.
 
 ## Add the bot to a Discord server
 
@@ -70,4 +76,3 @@ or **OAuth2 > URL Generator**. Select the `bot` scope and grant only the needed
 permissions, including **View Channel** and **Send Messages**. Open the generated
 install link, choose your server, and authorize it. You need permission to manage
 that server. This authorization is separate from deploying the bot.
-#

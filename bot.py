@@ -2,15 +2,17 @@ import asyncio
 import logging
 import math
 import os
-import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
 
 import aiohttp
 import discord
 from dotenv import load_dotenv
+from psycopg.rows import tuple_row
+from psycopg_pool import AsyncConnectionPool
+
+from migrations import run_migrations
 
 load_dotenv()
 
@@ -136,7 +138,7 @@ class NotifierBot(discord.Client):
             raise ValueError("DISCORD_CHANNEL_ID must be a positive numeric ID")
         self.canvas_base_url = required_env("CANVAS_BASE_URL").rstrip("/")
         self.canvas_token = required_env("CANVAS_API_TOKEN")
-        self.state_path = Path(os.getenv("STATE_DB_PATH", "canvas_notifier.sqlite3"))
+        self.database_url = required_env("DATABASE_URL")
         self.poll_interval = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))
         if self.poll_interval < 30:
             raise ValueError("POLL_INTERVAL_SECONDS must be at least 30")
@@ -144,26 +146,20 @@ class NotifierBot(discord.Client):
         self.reminder_hours = parse_reminder_hours(
             os.getenv("DUE_REMINDER_HOURS", "24,1")
         )
-        self.db: sqlite3.Connection | None = None
+        self.db: AsyncConnectionPool | None = None
         self.http: aiohttp.ClientSession | None = None
         self.poller: asyncio.Task[None] | None = None
 
     async def setup_hook(self) -> None:
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.state_path)
-        self.db.execute(
-            "CREATE TABLE IF NOT EXISTS seen (kind TEXT NOT NULL, item_id TEXT NOT NULL, "
-            "PRIMARY KEY (kind, item_id))"
+        self.db = AsyncConnectionPool(
+            conninfo=self.database_url,
+            min_size=1,
+            max_size=2,
+            open=False,
+            kwargs={"row_factory": tuple_row},
         )
-        self.db.execute(
-            "CREATE TABLE IF NOT EXISTS sent_reminders (assignment_id TEXT NOT NULL, "
-            "due_at TEXT NOT NULL, reminder_hours REAL NOT NULL, "
-            "PRIMARY KEY (assignment_id, due_at, reminder_hours))"
-        )
-        self.db.execute(
-            "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-        )
-        self.db.commit()
+        await self.db.open()
+        await run_migrations(self.db)
         self.http = aiohttp.ClientSession(
             headers={"Authorization": f"Bearer {self.canvas_token}"},
             timeout=aiohttp.ClientTimeout(total=30),
@@ -180,57 +176,66 @@ class NotifierBot(discord.Client):
         if self.http:
             await self.http.close()
         if self.db:
-            self.db.close()
+            await self.db.close()
         await super().close()
 
-    def _database(self) -> sqlite3.Connection:
+    def _database(self) -> AsyncConnectionPool:
         if self.db is None:
             raise RuntimeError("Notifier database is not initialized")
         return self.db
 
-    def _has_seen(self, kind: str, item_id: str) -> bool:
-        row = self._database().execute(
-            "SELECT 1 FROM seen WHERE kind = ? AND item_id = ?", (kind, item_id)
-        ).fetchone()
-        return row is not None
+    async def _has_seen(self, kind: str, item_id: str) -> bool:
+        async with self._database().connection() as connection:
+            cursor = await connection.execute(
+                "SELECT 1 FROM seen WHERE kind = %s AND item_id = %s",
+                (kind, item_id),
+            )
+            return await cursor.fetchone() is not None
 
-    def _mark_seen(self, kind: str, item_id: str) -> None:
-        self._database().execute(
-            "INSERT OR IGNORE INTO seen (kind, item_id) VALUES (?, ?)",
-            (kind, item_id),
-        )
-        self._database().commit()
+    async def _mark_seen(self, kind: str, item_id: str) -> None:
+        async with self._database().connection() as connection:
+            await connection.execute(
+                "INSERT INTO seen (kind, item_id) VALUES (%s, %s) "
+                "ON CONFLICT (kind, item_id) DO NOTHING",
+                (kind, item_id),
+            )
 
-    def _is_baselined(self, kind: str) -> bool:
-        row = self._database().execute(
-            "SELECT 1 FROM metadata WHERE key = ?", (f"baseline:{kind}",)
-        ).fetchone()
-        return row is not None
+    async def _is_baselined(self, kind: str) -> bool:
+        async with self._database().connection() as connection:
+            cursor = await connection.execute(
+                "SELECT 1 FROM metadata WHERE key = %s", (f"baseline:{kind}",)
+            )
+            return await cursor.fetchone() is not None
 
-    def _set_baseline(self, kind: str) -> None:
-        self._database().execute(
-            "INSERT OR IGNORE INTO metadata (key, value) VALUES (?, 'done')",
-            (f"baseline:{kind}",),
-        )
-        self._database().commit()
+    async def _set_baseline(self, kind: str) -> None:
+        async with self._database().connection() as connection:
+            await connection.execute(
+                "INSERT INTO metadata (key, value) VALUES (%s, 'done') "
+                "ON CONFLICT (key) DO NOTHING",
+                (f"baseline:{kind}",),
+            )
 
-    def _reminder_sent(self, assignment_id: str, due_at: str, hours: float) -> bool:
-        row = self._database().execute(
-            "SELECT 1 FROM sent_reminders "
-            "WHERE assignment_id = ? AND due_at = ? AND reminder_hours = ?",
-            (assignment_id, due_at, hours),
-        ).fetchone()
-        return row is not None
+    async def _reminder_sent(
+        self, assignment_id: str, due_at: str, hours: float
+    ) -> bool:
+        async with self._database().connection() as connection:
+            cursor = await connection.execute(
+                "SELECT 1 FROM sent_reminders "
+                "WHERE assignment_id = %s AND due_at = %s AND reminder_hours = %s",
+                (assignment_id, due_at, hours),
+            )
+            return await cursor.fetchone() is not None
 
-    def _mark_reminder_sent(
+    async def _mark_reminder_sent(
         self, assignment_id: str, due_at: str, hours: float
     ) -> None:
-        self._database().execute(
-            "INSERT OR IGNORE INTO sent_reminders "
-            "(assignment_id, due_at, reminder_hours) VALUES (?, ?, ?)",
-            (assignment_id, due_at, hours),
-        )
-        self._database().commit()
+        async with self._database().connection() as connection:
+            await connection.execute(
+                "INSERT INTO sent_reminders "
+                "(assignment_id, due_at, reminder_hours) VALUES (%s, %s, %s) "
+                "ON CONFLICT (assignment_id, due_at, reminder_hours) DO NOTHING",
+                (assignment_id, due_at, hours),
+            )
 
     async def _get_channel(self) -> discord.abc.Messageable:
         channel = self.get_channel(self.channel_id)
@@ -289,10 +294,10 @@ class NotifierBot(discord.Client):
     async def _process_new_items(
         self, kind: str, items: list[tuple[dict[str, Any], str]]
     ) -> None:
-        baselined = self._is_baselined(kind)
+        baselined = await self._is_baselined(kind)
         for item, course_name in items:
             item_id = str(item.get("id", ""))
-            if not item_id or self._has_seen(kind, item_id):
+            if not item_id or await self._has_seen(kind, item_id):
                 continue
             if baselined:
                 title = str(item.get("title") or f"New {kind}")
@@ -300,9 +305,9 @@ class NotifierBot(discord.Client):
                     f"**Canvas {kind.title()}: {course_name}**\n{title}",
                     item.get("html_url"),
                 )
-            self._mark_seen(kind, item_id)
+            await self._mark_seen(kind, item_id)
         if not baselined:
-            self._set_baseline(kind)
+            await self._set_baseline(kind)
             logger.info("Recorded existing %ss without posting a history dump", kind)
 
     async def _process_due_reminders(
@@ -321,7 +326,9 @@ class NotifierBot(discord.Client):
                 hours
                 for hours in self.reminder_hours
                 if hours_left <= hours
-                and not self._reminder_sent(assignment_id, str(due_at_raw), hours)
+                and not await self._reminder_sent(
+                    assignment_id, str(due_at_raw), hours
+                )
             ]
             if not eligible:
                 continue
@@ -335,7 +342,7 @@ class NotifierBot(discord.Client):
                 f"(due {due_text}).",
                 assignment.get("html_url"),
             )
-            self._mark_reminder_sent(
+            await self._mark_reminder_sent(
                 assignment_id, str(due_at_raw), reminder_hours
             )
 
