@@ -3,3 +3,5 @@
 __pycache__/
 *.py[cod]
 canvas_notifier.sqlite3
+bot.pid
+logs/

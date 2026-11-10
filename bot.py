@@ -5,6 +5,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import discord
@@ -12,6 +13,7 @@ from dotenv import load_dotenv
 from psycopg.rows import tuple_row
 from psycopg_pool import AsyncConnectionPool
 
+from daily_reset import parse_reset_timezone, reset_notification_state_if_new_day
 from migrations import run_migrations
 
 load_dotenv()
@@ -139,6 +141,9 @@ class NotifierBot(discord.Client):
         self.canvas_base_url = required_env("CANVAS_BASE_URL").rstrip("/")
         self.canvas_token = required_env("CANVAS_API_TOKEN")
         self.database_url = required_env("DATABASE_URL")
+        self.reset_timezone: ZoneInfo = parse_reset_timezone(
+            os.getenv("DAILY_RESET_TIMEZONE", "Asia/Manila")
+        )
         self.poll_interval = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))
         if self.poll_interval < 30:
             raise ValueError("POLL_INTERVAL_SECONDS must be at least 30")
@@ -268,6 +273,9 @@ class NotifierBot(discord.Client):
     async def poll_once(self) -> None:
         if self.http is None:
             raise RuntimeError("Canvas HTTP session is not initialized")
+        await reset_notification_state_if_new_day(
+            self._database(), self.reset_timezone
+        )
         client = CanvasClient(self.canvas_base_url, self.http)
         courses = await client.courses()
         if self.course_ids:

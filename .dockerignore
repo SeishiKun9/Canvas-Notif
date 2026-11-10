@@ -1,6 +1,0 @@
-.env
-.venv
-.git
-__pycache__
-*.py[cod]
-*.sqlite3
