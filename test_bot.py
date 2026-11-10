@@ -1,8 +1,10 @@
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
 
 from bot import (
     CanvasClient,
+    NotifierBot,
     parse_canvas_datetime,
     parse_course_ids,
     parse_reminder_hours,
@@ -48,6 +50,30 @@ class ConfigTests(unittest.TestCase):
             client._next_link(
                 '<https://other.example/api/v1/courses?page=2>; rel="next"'
             )
+
+
+class BotStatusTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ready_posts_active_notice_only_once(self):
+        bot = NotifierBot.__new__(NotifierBot)
+        bot.active_notice_sent = False
+        bot._send = AsyncMock()
+
+        await bot.on_ready()
+        await bot.on_ready()
+
+        bot._send.assert_awaited_once_with(
+            "Canvas notifier is online and monitoring this channel."
+        )
+
+    async def test_failed_active_notice_can_retry(self):
+        bot = NotifierBot.__new__(NotifierBot)
+        bot.active_notice_sent = False
+        bot._send = AsyncMock(side_effect=RuntimeError("Discord unavailable"))
+
+        with self.assertRaisesRegex(RuntimeError, "Discord unavailable"):
+            await bot.on_ready()
+
+        self.assertFalse(bot.active_notice_sent)
 
 
 if __name__ == "__main__":

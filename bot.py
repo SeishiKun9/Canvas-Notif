@@ -154,6 +154,7 @@ class NotifierBot(discord.Client):
         self.db: AsyncConnectionPool | None = None
         self.http: aiohttp.ClientSession | None = None
         self.poller: asyncio.Task[None] | None = None
+        self.active_notice_sent = False
 
     async def setup_hook(self) -> None:
         self.db = AsyncConnectionPool(
@@ -170,6 +171,13 @@ class NotifierBot(discord.Client):
             timeout=aiohttp.ClientTimeout(total=30),
         )
         self.poller = asyncio.create_task(self._poll_forever())
+
+    async def on_ready(self) -> None:
+        if self.active_notice_sent:
+            return
+        await self._send("Canvas notifier is online and monitoring this channel.")
+        self.active_notice_sent = True
+        logger.info("Posted bot active notification to Discord")
 
     async def close(self) -> None:
         if self.poller:

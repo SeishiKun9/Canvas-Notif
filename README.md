@@ -51,6 +51,9 @@ the verified bot process. Output is written to `logs\bot.log` and
 `logs\bot-error.log`; the PID file and logs are ignored by Git. The laptop must
 remain on, awake, and connected to the internet to poll Canvas and post
 notifications. After a Windows restart, run `.\Start-Bot.ps1` again.
+When the bot connects, it posts a one-time active message in the configured
+Discord channel. Reconnecting to Discord does not post another active message
+for the same bot process.
 
 The bot runs pending versioned SQL migrations at startup. The first successful
 poll records existing announcements and assignments without posting a history
