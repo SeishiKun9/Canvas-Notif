@@ -5,3 +5,4 @@ __pycache__/
 canvas_notifier.sqlite3
 bot.pid
 logs/
+.vscode/

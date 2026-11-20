@@ -37,32 +37,51 @@ if ($missingVariables.Count -gt 0) {
     throw "Set these required variables in .env before starting the bot: $($missingVariables -join ', ')"
 }
 
+$databaseUrl = $configuredVariables['DATABASE_URL']
+if ($databaseUrl -match '@(localhost|127\.0\.0\.1)(:(\d+))?') {
+    $pgPort = if ($Matches[3]) { [int]$Matches[3] } else { 5432 }
+    $pgTcp = Test-NetConnection -ComputerName '127.0.0.1' -Port $pgPort -WarningAction SilentlyContinue
+    if (-not $pgTcp.TcpTestSucceeded) {
+        $serviceName = if ($pgPort -eq 5433) { 'postgresql-x64-14' } else { 'postgresql-x64-18' }
+        $pgService = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if ($pgService -and $pgService.Status -ne 'Running') {
+            Write-Host "PostgreSQL service ($serviceName) is not running. Starting it..."
+            try {
+                Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -Command Start-Service -Name '$serviceName'" -Wait
+            } catch {
+                Write-Warning "Could not automatically elevate to start $serviceName. Please start it as Administrator."
+            }
+            Start-Sleep -Seconds 2
+        }
+    }
+}
+
 if (Test-Path -LiteralPath $pidPath -PathType Leaf) {
     $savedPidText = (Get-Content -LiteralPath $pidPath -Raw).Trim()
     $savedPid = 0
     if (-not [int]::TryParse($savedPidText, [ref]$savedPid) -or $savedPid -le 0) {
-        throw "The bot PID file is invalid. Inspect bot.pid before removing it."
-    }
-    $savedProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $savedPid" -ErrorAction SilentlyContinue
-    if ($savedProcess) {
-        $samePython = $savedProcess.ExecutablePath -and
-            [string]::Equals(
-                $savedProcess.ExecutablePath,
-                $pythonPath,
-                [StringComparison]::OrdinalIgnoreCase
-            )
-        $sameBot = $savedProcess.CommandLine -and
-            $savedProcess.CommandLine.IndexOf(
-                $botPath,
-                [StringComparison]::OrdinalIgnoreCase
-            ) -ge 0
-        if ($samePython -and $sameBot) {
-            Write-Output "Canvas notifier is already running (PID $savedPid)."
-            exit 0
+        Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+    } else {
+        $savedProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $savedPid" -ErrorAction SilentlyContinue
+        if ($savedProcess) {
+            $samePython = $savedProcess.ExecutablePath -and
+                [string]::Equals(
+                    $savedProcess.ExecutablePath,
+                    $pythonPath,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            $sameBot = $savedProcess.CommandLine -and
+                $savedProcess.CommandLine.IndexOf(
+                    $botPath,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -ge 0
+            if ($samePython -and $sameBot) {
+                Write-Output "Canvas notifier is already running (PID $savedPid)."
+                exit 0
+            }
         }
-        throw "PID $savedPid belongs to another process. Inspect bot.pid; no process was changed."
+        Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
     }
-    Remove-Item -LiteralPath $pidPath
 }
 
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
@@ -81,6 +100,10 @@ Start-Sleep -Seconds 2
 $runningProcess = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
 if (-not $runningProcess) {
     Remove-Item -LiteralPath $pidPath -ErrorAction SilentlyContinue
+    $errorDetail = if (Test-Path -LiteralPath $stderrPath) { (Get-Content -LiteralPath $stderrPath -Raw).Trim() } else { "" }
+    if ($errorDetail) {
+        throw "The bot exited during startup:`n$errorDetail"
+    }
     throw "The bot exited during startup. Check logs\bot-error.log for details."
 }
 

@@ -2,10 +2,14 @@ import asyncio
 import logging
 import math
 import os
+import sys
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 import aiohttp
 import discord
@@ -152,7 +156,7 @@ class NotifierBot(discord.Client):
             os.getenv("DUE_REMINDER_HOURS", "24,1")
         )
         self.db: AsyncConnectionPool | None = None
-        self.http: aiohttp.ClientSession | None = None
+        self.canvas_session: aiohttp.ClientSession | None = None
         self.poller: asyncio.Task[None] | None = None
         self.active_notice_sent = False
 
@@ -166,7 +170,7 @@ class NotifierBot(discord.Client):
         )
         await self.db.open()
         await run_migrations(self.db)
-        self.http = aiohttp.ClientSession(
+        self.canvas_session = aiohttp.ClientSession(
             headers={"Authorization": f"Bearer {self.canvas_token}"},
             timeout=aiohttp.ClientTimeout(total=30),
         )
@@ -184,10 +188,10 @@ class NotifierBot(discord.Client):
             self.poller.cancel()
             try:
                 await self.poller
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, Exception):
                 pass
-        if self.http:
-            await self.http.close()
+        if self.canvas_session:
+            await self.canvas_session.close()
         if self.db:
             await self.db.close()
         await super().close()
@@ -262,10 +266,18 @@ class NotifierBot(discord.Client):
         channel = await self._get_channel()
         if url:
             message = f"{message}\n{url}"
-        await channel.send(
-            message[:2000],
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        try:
+            await channel.send(
+                message[:2000],
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.errors.Forbidden:
+            logger.error(
+                "Missing Access: The bot cannot send messages to channel %s. "
+                "Ensure the bot has 'View Channel' and 'Send Messages' permissions in that channel.",
+                self.channel_id,
+            )
+            raise
 
     async def _poll_forever(self) -> None:
         await self.wait_until_ready()
@@ -279,12 +291,12 @@ class NotifierBot(discord.Client):
             await asyncio.sleep(self.poll_interval)
 
     async def poll_once(self) -> None:
-        if self.http is None:
+        if self.canvas_session is None:
             raise RuntimeError("Canvas HTTP session is not initialized")
         await reset_notification_state_if_new_day(
             self._database(), self.reset_timezone
         )
-        client = CanvasClient(self.canvas_base_url, self.http)
+        client = CanvasClient(self.canvas_base_url, self.canvas_session)
         courses = await client.courses()
         if self.course_ids:
             courses = [

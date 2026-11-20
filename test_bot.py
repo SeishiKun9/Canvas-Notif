@@ -53,6 +53,20 @@ class ConfigTests(unittest.TestCase):
 
 
 class BotStatusTests(unittest.IsolatedAsyncioTestCase):
+    def test_init_preserves_discord_http_client(self):
+        import os
+        from unittest.mock import patch
+        env = {
+            "DISCORD_CHANNEL_ID": "123",
+            "CANVAS_BASE_URL": "https://canvas.example",
+            "CANVAS_API_TOKEN": "token",
+            "DATABASE_URL": "postgresql://user:pass@localhost:5432/db",
+        }
+        with patch.dict(os.environ, env):
+            bot = NotifierBot()
+            self.assertIsNotNone(bot.http)
+            self.assertTrue(hasattr(bot.http, "loop"))
+
     async def test_ready_posts_active_notice_only_once(self):
         bot = NotifierBot.__new__(NotifierBot)
         bot.active_notice_sent = False

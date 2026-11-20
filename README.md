@@ -39,7 +39,10 @@ new assignments, and upcoming assignment due dates.
    py -m pip install -r requirements.txt
    ```
 
-Start and stop the bot from PowerShell in the project folder:
+To start the bot by double-clicking, open `Start-Bot.cmd`. It launches
+PowerShell and leaves the window open so you can see the startup result. You
+can also start it from PowerShell in the project folder. Stop the bot from
+PowerShell:
 
 ```powershell
 .\Start-Bot.ps1
